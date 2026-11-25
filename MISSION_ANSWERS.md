@@ -180,10 +180,46 @@ Các anti-pattern tìm thấy trong `01-localhost-vs-production/develop/app.py` 
 
 ## Part 3: Cloud Deployment
 
-### Exercise 3.1: Railway deployment
+### Exercise 3.2: Render deployment (Agent Part 6)
 
-- URL: https://your-app.railway.app
-- Screenshot: [Link to screenshot in repo]
+- **Nền tảng:** Render (Web Service Docker với `Root Directory: 06-lab-complete` + Render Key Value / Redis)
+- **Public URL:** https://k5-l3a-day14-lexuanphuc-2a202603655.onrender.com
+- **Biến môi trường đặt trên Render Dashboard** *(không ghi secret trong code)*: `ENVIRONMENT=production`, `REDIS_URL` (Internal Key Value URL), `AGENT_API_KEY` (đặt trực tiếp trên Dashboard), `RATE_LIMIT_PER_MINUTE=10`, `DAILY_BUDGET_USD=1.0` (`PORT` do Render tự động cấp).
+- **Kết quả kiểm tra 4 lệnh CP6 (che key bằng `$AGENT_API_KEY`):**
+  ```bash
+  BASE="https://k5-l3a-day14-lexuanphuc-2a202603655.onrender.com"
+  curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/health"                                                                                              # 200
+  curl -sS -o /dev/null -w '%{http_code}\n' "$BASE/ready"                                                                                               # 200
+  curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -d '{"question":"Hello"}'                           # 401
+  curl -sS -o /dev/null -w '%{http_code}\n' -X POST "$BASE/ask" -H 'Content-Type: application/json' -H "X-API-Key: $AGENT_API_KEY" -d '{"question":"Hello"}'  # 200
+  ```
+  - `/health` → `200` (`{"status":"ok","environment":"production"}`)
+  - `/ready` → `200` (`{"status":"ready"}`)
+  - `POST /ask` (không có key) → `401` (`{"detail":"Invalid or missing API key"}`)
+  - `POST /ask` (có `X-API-Key`) → `200` (`{"question":"Hello","answer":"Tôi là AI agent được deploy lên cloud. Câu hỏi của bạn đã được nhận.","cost_usd":1.83e-05}`)
+- **Screenshots:**
+  - [Deployment dashboard](screenshots/dashboard.png)
+  - [Service running](screenshots/running.png)
+  - [Test results](screenshots/test.png)
+
+### So sánh `railway.toml` và `render.yaml`
+
+| Tiêu chí | `railway.toml` (`06-lab-complete/railway.toml`) | `render.yaml` (`06-lab-complete/render.yaml` / `03-cloud-deployment/render/render.yaml`) |
+| --- | --- | --- |
+| **Định dạng & vai trò** | TOML — cấu hình build/deploy cho **1 service đơn lẻ**. | YAML (Blueprint / IaC) — khai báo được **cả stack nhiều service** (Web Service + Redis/Key Value) trong cùng 1 file. |
+| **Builder / Runtime** | Khai báo `[build] builder = "DOCKERFILE"` (hoặc `"NIXPACKS"`). | Khai báo `type: web`, `runtime: docker` (hoặc `runtime: python`), `dockerfilePath`, `rootDir`, `region`, `plan`. |
+| **Health check** | `healthcheckPath = "/health"` dưới `[deploy]`, kèm `healthcheckTimeout`, `restartPolicyType`. | `healthCheckPath: /health` trong spec của web service. |
+| **Biến môi trường & Secrets** | Không khai báo trực tiếp secret trong file; đặt qua Railway Dashboard hoặc `railway variables set` và nối Redis bằng reference `${{Redis.REDIS_URL}}`. | Hỗ trợ khai báo `envVars` ngay trong YAML nhưng với secret phải dùng `sync: false` (nhập tay trên Dashboard) hoặc `generateValue: true` (tự sinh random), và nối Redis bằng `fromService` (`type: keyvalue`, `property: connectionString`). |
+
+- **Vì sao khác nhau:** Railway thiên về cấu hình gọn cho từng service riêng lẻ (phần database/env quản lý qua Dashboard/CLI), còn Render Blueprint dùng `render.yaml` theo hướng Infrastructure-as-Code để đồng bộ cả ứng dụng lẫn hạ tầng phụ thuộc (Redis, region, plan) từ một file Git duy nhất.
+
+### Exercise 3.3: GCP Cloud Run CI/CD (`03-cloud-deployment/production-cloud-run/`)
+
+- Pipeline CI/CD trong `cloudbuild.yaml` tự động kích hoạt khi push lên nhánh `main` và đi qua 4 bước tuần tự (`waitFor`):
+  1. **Test (`python:3.11-slim`):** cài `requirements.txt` + `pytest` và chạy `pytest tests/ -v` để chặn build nếu test fail.
+  2. **Build (`gcr.io/cloud-builders/docker`):** build Docker image gắn 2 tag (`$COMMIT_SHA` và `latest`) kèm `--cache-from` để tận dụng layer cache.
+  3. **Push:** đẩy các tag image vừa build lên Google Container Registry (`gcr.io/$PROJECT_ID/ai-agent`).
+  4. **Deploy (`gcloud run deploy`):** triển khai revision mới lên Cloud Run (`asia-southeast1`), cấu hình public (`--allow-unauthenticated`), autoscale (`min-instances=1`, `max-instances=10`), tài nguyên (`512Mi`, `1 CPU`) và nạp secret từ Secret Manager (`--set-secrets`). File `service.yaml` bổ sung đặc tả Knative/Cloud Run chi tiết cho `containerConcurrency: 80`, `livenessProbe` (`/health`) và `startupProbe` (`/ready`).
 
 ## Part 4: API Security
 
@@ -500,6 +536,33 @@ Các anti-pattern tìm thấy trong `01-localhost-vs-production/develop/app.py` 
   - Tạo session `b3326bd3-248a-42df-af67-c079564c6d66` (Turn 1 do `instance-0a2846` xử lý), chạy `docker stop k5-day14-scaling-agent-1`, rồi gửi Turn 2 với cùng `session_id`: hệ thống tự định tuyến sang `instance-3af704` (`"turn":3,"storage":"redis"`), và `GET /chat/b3326bd3-248a-42df-af67-c079564c6d66/history` trả về đủ `count: 4` messages không mất dữ liệu.
   - Dọn sạch stack sau khi test: `docker compose -p k5-day14-scaling down`.
 
+## Part 6: Final Project — Production Readiness Check
+
+Chạy `.venv/bin/python check_production_ready.py --public-url https://k5-l3a-day14-lexuanphuc-2a202603655.onrender.com` trong `06-lab-complete/` (chế độ đầy đủ có Docker):
+
+```text
+================================================================
+  📋 Checklist Deliverable
+     ✅ Dockerfile (multi-stage, < 500 MB)
+     ✅ docker-compose.yml (agent + redis)
+     ✅ .dockerignore
+     ✅ Health check endpoint (GET /health)
+     ✅ Readiness endpoint (GET /ready)
+     ✅ API Key authentication
+     ✅ Rate limiting
+     ✅ Cost guard
+     ✅ Config từ environment variables
+     ✅ Structured logging
+     ✅ Graceful shutdown
+     ✅ Public URL ready (Railway / Render config)
+----------------------------------------------------------------
+  Result: 12/12 tiêu chí đạt · 44/44 checks passed
+  🎉 PASS 12/12 — PRODUCTION READY! Deploy nào!
+================================================================
+```
+
+*(Chi tiết đo được: Docker image `297 MB`, `docker stop` thoát `exit code 0` trong `0.4s`, `7 dòng JSON` log hợp lệ, rate limit giữ state qua Redis khi restart agent, `GET https://k5-l3a-day14-lexuanphuc-2a202603655.onrender.com/health → 200`.)*
+
 ---
 
 ## AI Log
@@ -518,3 +581,7 @@ Các anti-pattern tìm thấy trong `01-localhost-vs-production/develop/app.py` 
 | Part 4 — Exercise 4.3 | Nhờ phân tích `04-api-gateway/production/rate_limiter.py`, chạy vòng lặp 20 requests với token `student` và ghi kết quả vào `MISSION_ANSWERS.md`. | Giải thích thuật toán Sliding Window, ngưỡng `10` vs `100` req/phút, cách bypass cho admin, cùng log 20 requests (`1..10` đạt `200`, `11..20` bị `429`) và full header `429`. | Tự chạy vòng lặp 20 lần trên máy, kiểm tra header `X-RateLimit-*` / `Retry-After` và đảm bảo che token + giải phóng cổng `8000`. |
 | Part 4 — Exercise 4.4 | Nhờ phân tích `04-api-gateway/production/cost_guard.py`, thiết kế hàm `check_budget` dùng Redis (10 USD/tháng) và giải thích vai trò kết hợp Rate Limit + Cost Guard. | Phân tích cơ chế check global/user budget (`503`/`402`), đoạn code Redis `budget:{user_id}:{YYYY-MM}` dùng `INCRBYFLOAT` + TTL 32 ngày và so sánh Rate Limit vs Cost Guard. | Tự đối chiếu logic với `cost_guard.py` (dòng 20–110) và `CODE_LAB.md` Exercise 4.4 trước khi lưu vào `MISSION_ANSWERS.md`. |
 | Part 5 — Exercise 5.1–5.5 | Nhờ kiểm thử `05-scaling-reliability/develop/app.py` (health, ready, SIGTERM) và chạy stack 3 instances `05-scaling-reliability/production` (`test_stateless.py` + `docker stop` 1 instance). | Kết quả thực tế `/health` & `/ready`, 2 request song song vẫn trả `200` khi nhận `SIGTERM`, output `test_stateless.py` qua 3 instances (`10` messages) và fault tolerance khi tắt `agent-1`. | Tự chạy lệnh `docker compose -p k5-day14-scaling ...`, `python3 test_stateless.py`, kiểm tra history sau khi dừng 1 container rồi `down` stack trả cổng `8080`. |
+| Part 6 — Final Project | Nhờ hướng dẫn hoàn thiện 11 file khung trong `06-lab-complete/` (tạo `render.yaml`, dọn `main.py`) và chạy `check_production_ready.py`. | Mẫu cấu hình chuẩn 12-Factor, Redis sliding-window rate limit, cost guard, JSON logging, multi-stage Dockerfile (`exec uvicorn`) và file `render.yaml`. | Tự cấu hình các file trong `06-lab-complete/`, chạy bản đầy đủ `check_production_ready.py` đạt `PASS 12/12 (44/44 checks passed)` và dán kết quả vào `MISSION_ANSWERS.md`. |
+| Part 3 — Cloud Deployment | Nhờ kiểm tra URL Render live, tạo `DEPLOYMENT.md`, so sánh `railway.toml` vs `render.yaml` và tóm tắt pipeline Cloud Run (`Exercise 3.3`). | Output thực tế 4 lệnh CP6 (`200`, `200`, `401`, `200`), bảng so sánh 2 file config và mô tả 4 bước `cloudbuild.yaml` + `service.yaml`. | Tự deploy Web Service & Key Value lên Render, kiểm chứng lại qua `--public-url` và xác nhận không commit `AGENT_API_KEY` thật vào repo. |
+| Part 7 — Benchmark local (CP7) | Nhờ thêm metric `agent_question_length_chars` (`develop/app.py`), chạy load test & eval v1/v2, sửa `KNOWLEDGE_BASE`, tạo CI workflow và điền mục 1–3 của `BENCHMARK_REPORT.md`. | Đủ 10 file JSON trong `reports/` (`eval_v2_fixed.json` đạt `100.0%` `23/23`), file `.github/workflows/eval.yml` và số liệu phần 1–3 trong `BENCHMARK_REPORT.md`. | Tự chạy toàn bộ `load_test.py` và `run_eval.py` trên máy, đối chiếu từng con số trong `BENCHMARK_REPORT.md` khớp 100% file JSON đã lưu. |
+| Part 7 — Observability stack (CP8) | Nhờ sửa `PYTHONUSERBASE` trong `production/Dockerfile`, chạy stack `k5-day14-observability` (Locust `scale=1` vs `scale=3`, Jaeger trace, `promtool`, 4 thí nghiệm alert), chụp 4 ảnh và điền mục 4–6 của `BENCHMARK_REPORT.md`. | CSV `scale_1_stats.csv` & `scale_3_stats.csv` trong `benchmark-results/`, 4 ảnh PNG trong `screenshots/`, `trace_id` khớp JSON log, thời gian 4 alert firing thực tế và phân tích hoàn chỉnh mục 4–6. | Tự kiểm tra từng ảnh PNG bằng mắt, đối chiếu mọi con số trong `BENCHMARK_REPORT.md` khớp CSV/log/Prometheus, sau đó `docker compose -p k5-day14-observability down -v` và kiểm tra sạch `.env`/secret. |
